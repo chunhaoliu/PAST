@@ -1,68 +1,75 @@
-# PAST-Mixer
+# PAST
 
-Official source release for **PAST-Mixer: Observable Kinematic-State Mixing for Open-Loop Long-Horizon Ballistic Trajectory Prediction**.
+Official code for **PAST: Posterior-Conditioned Residual Learning for Long-Horizon Ballistic Trajectory Prediction From Short Radar Tracks** (IEEE Transactions on Aerospace and Electronic Systems, under review).
 
-PAST-Mixer maps a short tracked Cartesian trajectory to a complete future trajectory. The released mainline constructs causal position--velocity--acceleration descriptors from the observed prefix, applies pre-normalized temporal and channel mixing, and predicts horizon-wide displacements anchored at the last observation.
+PAST forecasts a ballistic trajectory to impact from a 1 s radar track. A drag-estimating unscented Kalman filter (UKF) supplies a physical forecast (the anchor) and its posterior; a sequence network learns the open-loop correction of the anchor, conditioned on anchor context and filter uncertainty. Sensor-randomized re-observation trains the correction across radar conditions. The residual interface accepts any backbone; validation selects TSMixer (PAST-TSMixer).
 
-## Release scope
+On the paper's high-fidelity benchmark, PAST-TSMixer reaches 17.5 m average displacement error versus 39.9 m for the drag-UKF, lowers 90th-percentile impact-point error from 67.1 to 52.6 m, and lowers mean time-to-impact error from 0.229 to 0.079 s.
 
-This repository contains the model, training and evaluation pipeline, paper configuration, unit tests, and a non-operational synthetic smoke-test generator. It intentionally excludes local datasets, checkpoints, generated result arrays, internal archives, candidate architectures, and third-party baseline snapshots.
+## Contents
 
-The manuscript benchmark uses controlled representative projectile-class simulation and is not field telemetry, an exact firing-table reconstruction, or an operational deployment study. The parameterized benchmark generator and generated benchmark data are not included in this source-only release. The demo data produced below verify the software interface only and must not be used to reproduce or reinterpret the manuscript results.
+| Path | Role |
+|---|---|
+| `utils/radar.py` | Polar radar measurements, converted-measurement CA Kalman tracker, sensor-randomized re-observation (`radar_track_window(..., sensor_rng=...)`) |
+| `utils/ballistic_physics.py` | Drag point-mass model, RK4, drag-UKF (`ukf_drag_track`), physical baselines |
+| `tools/evaluate_protocol_v2_physics_baselines.py` | Baselines B1-B6, drag-UKF anchors and posterior (uncertainty) features |
+| `data_provider/` | Kinematic descriptors, anchor context, uncertainty features, train-only normalization |
+| `models/` | TSMixer, PAST-Mixer, Transformer, TimeMixer, LSTM, iTransformer behind one residual interface; CE-LSTM comparison |
+| `exp/`, `run.py` | Training with the masked physical-unit loss (RMSE + 0.5 ADE) and evaluation |
+| `tools/summarize_protocol_v2.py`, `tools/conformal_protocol_v2.py` | Paired bootstrap confidence intervals; split-conformal impact regions |
+| `configs/paper_protocol.json` | Paper settings: benchmark, anchor, training flags, forecasting stages, backbone sizes, seeds |
 
-## Paper protocol
-
-- Input: 100 tracked Cartesian samples at 0.01 s (1 s).
-- Output: the next 1000 clean Cartesian positions (10 s).
-- Model: 3 mixer blocks, model dimension 256, feed-forward dimension 512.
-- Training seeds: 2021, 2022, and 2023.
-- Evaluation: RMSE, ADE, and FDE in meters.
-
-The machine-readable settings are in [`configs/paper_protocol.json`](configs/paper_protocol.json).
+The benchmark trajectory generator and the generated benchmark data are not part of this release. `scripts/generate_demo_data.py` produces generic, non-operational trajectories in the same file format so that the full pipeline can be run end to end.
 
 ## Installation
 
 ```bash
-python -m venv .venv
 python -m pip install -r requirements-dev.txt
 ```
 
-Python 3.10 or later is recommended. GPU execution is optional.
+Python 3.10 or later; a CUDA GPU is optional.
 
-## Software smoke test
-
-Generate a small generic dataset and run one CPU epoch:
+## End-to-end demo
 
 ```bash
-python scripts/generate_demo_data.py --output data/demo --seq-len 16 --pred-len 32
-python run.py --dataset_dir data/demo --seq_len 16 --pred_len 32 --dt 0.1 --d_model 16 --d_ff 32 --e_layers 1 --batch_size 8 --train_epochs 1 --patience 1 --use_gpu 0 --model_id software_demo
+# 1. Generic demo data with sensor-randomized re-observation of the training split
+python scripts/generate_demo_data.py --output data/demo --reobserve
+# 2. Physical baselines B1-B6 and validation selection of the UKF settings
+python tools/evaluate_protocol_v2_physics_baselines.py --data-dir data/demo --out results/demo_physics --horizon 500 --b5-fix
+# 3. Drag-UKF anchors and uncertainty features for every split
+python tools/evaluate_protocol_v2_physics_baselines.py --data-dir data/demo --out results/demo_physics --horizon 500 --anchors-only --report results/demo_physics/report.json --anchor-model ukf --anchor-unc
+# 4. PAST-TSMixer (small width for a CPU run)
+python run.py --dataset_dir data/demo --seq_len 100 --label_len 0 --pred_len 500 --model TSMixer --d_model 64 --d_ff 128 --e_layers 2 --train_epochs 5 --patience 5 --batch_size 32 --input_state kinematics --output_mode physics_anchor --anchor_context fit_unc --loss_mode physical_composite --ade_loss_weight 0.5 --fde_loss_weight 0 --select_metric val_rmse_m --residual_gate none --use_gpu 0 --model_id demo
 ```
 
-This command writes ignored artifacts under `checkpoints/` and `results/`. It is a software check, not a paper benchmark.
+The demo checks the software path only; its numbers are unrelated to the paper.
 
-Run the unit tests with:
+## Paper configuration
+
+`configs/paper_protocol.json` lists the exact training flags. A paper run combines `train_args`, one entry of `stages` (direct learning, physics residual, anchor context, PAST), one entry of `backbones`, and a seed, with `--pred_len 2000`. The main instance is the PAST stage with the TSMixer backbone, trained on the original-plus-re-observed training set with `--scaler_dataset_dir` pointing to the original training set.
+
+## Data format
+
+Each split (`train.pt`, `val.pt`, `test.pt`) is a dictionary:
+
+- `X`: clean positions `(N, L + H, 3)` in meters, observation window followed by the future, held at the impact point after impact;
+- `X_observed`: tracked window `(N, L, 3)`;
+- `valid_len`: future steps up to and including impact `(N,)`;
+- `polar`, `detected`: raw range-azimuth-elevation measurements and detection flags over the warm-up and window;
+- `meta`: per-trajectory lists including `domain`, `radar_site_xyz_m`, `t_go_s`, and, for re-observed copies, `sensor_noise_scale`.
+
+Normalization statistics come from the training split only.
+
+## Tests
 
 ```bash
 pytest
 ```
 
-## Compatible dataset format
-
-Each split is a PyTorch file named `train.pt`, `val.pt`, or `test.pt` containing:
-
-- `X`: a float tensor or NumPy array with shape `(N, T, 3)`;
-- `X_observed` (optional): tracked observations with shape `(N, T_obs, 3)`.
-
-Place a `protocol_manifest.json` in the same directory. The loader computes normalization statistics from `train.pt` only.
-
-## Manuscript evidence boundary
-
-The numerical results reported in the manuscript were obtained from the fixed three-seed paper protocol, not from the demo generator. Across those runs, the manuscript reports RMSE, ADE, and FDE reductions of 14.72%, 27.26%, and 24.51%, respectively, relative to the strongest matched Transformer baseline. These values are reported for provenance and are not regenerated by the source-only demo.
-
 ## Citation
 
-The manuscript is under review. Citation metadata will be updated with the final bibliographic record after publication; see [`CITATION.cff`](CITATION.cff).
+See [`CITATION.cff`](CITATION.cff); the bibliographic record will be updated on publication.
 
 ## License
 
-The source code in this repository is released under the [MIT License](LICENSE).
+MIT; see [`LICENSE`](LICENSE).

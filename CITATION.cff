@@ -1,6 +1,6 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite the accompanying manuscript."
-title: "PAST-Mixer: Observable Kinematic-State Mixing for Open-Loop Long-Horizon Ballistic Trajectory Prediction"
+title: "PAST: Posterior-Conditioned Residual Learning for Long-Horizon Ballistic Trajectory Prediction From Short Radar Tracks"
 type: software
 authors:
   - family-names: Liu
@@ -21,6 +21,6 @@ authors:
   - family-names: Pan
     given-names: Guangyuan
     orcid: "https://orcid.org/0000-0003-0115-6659"
-repository-code: "https://github.com/chunhaoliu/PAST-Mixer"
+repository-code: "https://github.com/chunhaoliu/PAST"
 license: MIT
-date-released: 2026-08-12
+date-released: 2026-11-11

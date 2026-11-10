@@ -1,34 +1,209 @@
 {
-  "task": "ballistic_forecast",
-  "protocol": {
-    "observation_mode": "tracked",
-    "observation_steps": 100,
-    "prediction_steps": 1000,
+  "benchmark": {
     "sample_interval_s": 0.01,
-    "input_shape": ["B", 100, 3],
-    "output_shape": ["B", 1000, 3]
+    "warm_up_s": 3.0,
+    "observation_steps": 100,
+    "prediction_steps": 2000,
+    "t_go_range_s": [
+      5.0,
+      20.0
+    ],
+    "splits": "16,200 train / 900 validation / 900 nominal test + 900 extrapolative test",
+    "reobserved_training": "original + one sensor-randomized re-observation per training trajectory (32,400)",
+    "generation_seed": 91
   },
-  "model": {
-    "name": "PASTMixer",
-    "d_model": 256,
-    "d_ff": 512,
-    "e_layers": 3,
-    "dropout": 0.1,
-    "past_norm_mode": "pre",
-    "past_output_mode": "displacement",
-    "past_state_mode": "kinematics",
-    "past_state_lag": 5
+  "anchor": {
+    "command": "tools/evaluate_protocol_v2_physics_baselines.py --b5-fix, then --anchors-only --report <report.json> --anchor-model ukf --anchor-unc",
+    "ukf_white_noise_acceleration_m2_s3": 0.01,
+    "ukf_drag_process_noise": 0.0
   },
-  "training": {
-    "seeds": [2021, 2022, 2023],
-    "epochs": 40,
-    "batch_size": 32,
-    "patience": 10,
-    "learning_rate": 0.001,
-    "learning_rate_schedule": "type3",
-    "loss": "physical_composite",
-    "ade_weight": 0.5,
-    "fde_weight": 0.25
+  "train_args": [
+    "--is_training",
+    "1",
+    "--observation_mode",
+    "tracked",
+    "--seq_len",
+    "100",
+    "--label_len",
+    "0",
+    "--pred_len",
+    "2000",
+    "--d_ff",
+    "512",
+    "--dropout",
+    "0.1",
+    "--train_epochs",
+    "80",
+    "--patience",
+    "15",
+    "--batch_size",
+    "32",
+    "--lradj",
+    "type3",
+    "--past_temporal_mode",
+    "simple",
+    "--past_norm_mode",
+    "pre",
+    "--past_state_lag",
+    "5",
+    "--dt",
+    "0.01",
+    "--ade_loss_weight",
+    "0.5",
+    "--fde_loss_weight",
+    "0",
+    "--input_state",
+    "kinematics",
+    "--loss_mode",
+    "physical_composite",
+    "--select_metric",
+    "val_rmse_m",
+    "--residual_gate",
+    "none"
+  ],
+  "stages": {
+    "direct_learning": [
+      "--output_mode",
+      "displacement",
+      "--anchor_context",
+      "none"
+    ],
+    "physics_residual": [
+      "--output_mode",
+      "physics_anchor",
+      "--anchor_context",
+      "none"
+    ],
+    "anchor_context": [
+      "--output_mode",
+      "physics_anchor",
+      "--anchor_context",
+      "fit"
+    ],
+    "PAST": [
+      "--output_mode",
+      "physics_anchor",
+      "--anchor_context",
+      "fit_unc"
+    ]
   },
-  "scope": "Controlled representative projectile-class simulation; not field telemetry, exact firing-table reconstruction, or operational deployment."
+  "backbones": {
+    "TSMixer": [
+      "--model",
+      "TSMixer",
+      "--d_model",
+      "256",
+      "--e_layers",
+      "4",
+      "--learning_rate",
+      "0.001"
+    ],
+    "PASTMixer": [
+      "--model",
+      "PASTMixer",
+      "--d_model",
+      "256",
+      "--e_layers",
+      "3",
+      "--learning_rate",
+      "0.001"
+    ],
+    "Transformer": [
+      "--model",
+      "Transformer",
+      "--d_model",
+      "256",
+      "--e_layers",
+      "3",
+      "--learning_rate",
+      "0.001"
+    ],
+    "TimeMixer": [
+      "--model",
+      "TimeMixer",
+      "--d_model",
+      "128",
+      "--e_layers",
+      "2",
+      "--learning_rate",
+      "0.001"
+    ],
+    "LSTM": [
+      "--model",
+      "LSTM",
+      "--d_model",
+      "128",
+      "--e_layers",
+      "2",
+      "--learning_rate",
+      "0.001"
+    ],
+    "iTransformer": [
+      "--model",
+      "iTransformer",
+      "--d_model",
+      "256",
+      "--e_layers",
+      "2",
+      "--learning_rate",
+      "0.0005"
+    ]
+  },
+  "main_instance": "PAST stage + TSMixer backbone, trained on the re-observed training set with --scaler_dataset_dir set to the original training set",
+  "seeds": [
+    2021,
+    2022,
+    2023,
+    2024,
+    2025
+  ],
+  "selection": "backbone grid width {128,256} x depth {2,3,4} x lr {1e-3,5e-4} on seed 2021 by minimum validation RMSE; training set and backbone by mean(validation RMSE, sensor-shift validation RMSE) over five seeds",
+  "ce_lstm_args": [
+    "--model",
+    "CELSTM",
+    "--observation_mode",
+    "tracked",
+    "--seq_len",
+    "100",
+    "--label_len",
+    "0",
+    "--pred_len",
+    "2000",
+    "--dt",
+    "0.01",
+    "--e_layers",
+    "2",
+    "--d_model",
+    "256",
+    "--alpha",
+    "0.9",
+    "--celstm_alpha_mode",
+    "fixed",
+    "--celstm_decoder",
+    "direct",
+    "--celstm_head_width",
+    "256",
+    "--dropout",
+    "0",
+    "--train_epochs",
+    "400",
+    "--patience",
+    "30",
+    "--batch_size",
+    "128",
+    "--learning_rate",
+    "0.001",
+    "--lradj",
+    "celstm",
+    "--loss_mode",
+    "mse",
+    "--select_metric",
+    "val_rmse_m",
+    "--input_state",
+    "position",
+    "--output_mode",
+    "absolute",
+    "--anchor_context",
+    "none"
+  ]
 }
