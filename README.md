@@ -14,7 +14,7 @@ On the paper's high-fidelity benchmark, PAST-TSMixer reaches 17.5 m average disp
 | `utils/ballistic_physics.py` | Drag point-mass model, RK4, drag-UKF (`ukf_drag_track`), physical baselines |
 | `tools/evaluate_protocol_v2_physics_baselines.py` | Baselines B1-B6, drag-UKF anchors and posterior (uncertainty) features |
 | `data_provider/` | Kinematic descriptors, anchor context, uncertainty features, train-only normalization |
-| `models/` | TSMixer, PAST-Mixer, Transformer, TimeMixer, LSTM, iTransformer behind one residual interface; CE-LSTM comparison |
+| `models/` | TSMixer, PNMixer (`--model PASTMixer`), Transformer, TimeMixer, LSTM, iTransformer behind one residual interface; CE-LSTM comparison |
 | `exp/`, `run.py` | Training with the masked physical-unit loss (RMSE + 0.5 ADE) and evaluation |
 | `tools/summarize_protocol_v2.py`, `tools/conformal_protocol_v2.py` | Paired bootstrap confidence intervals; split-conformal impact regions |
 | `configs/paper_protocol.json` | Paper settings: benchmark, anchor, training flags, forecasting stages, backbone sizes, seeds |

@@ -101,11 +101,13 @@ def run_b5(split, prior, q_accel, horizon, q_beta=0.0, beta_std=1.0, scaled_jitt
     return integrate(final[:, :6], final[:, 6], horizon)
 
 
-def ukf_params(split, prior, q_accel, q_beta=0.0, beta_std=1.0, scaled_jitter=False, unc=False):
+def ukf_params(split, prior, q_accel, q_beta=0.0, beta_std=1.0, scaled_jitter=False, unc=False, design_noise=False):
     """Window-end [p, v, beta] (N,7) of the B5 Drag-UKF.
 
     ``unc=True`` also returns (N,4) log uncertainty features: posterior beta std over prior
-    std, mean position std (m), mean velocity std (m/s), mean NIS of the window."""
+    std, mean position std (m), mean velocity std (m/s), mean NIS of the window.
+    ``design_noise=True`` makes the filter assume each domain's design noise level instead of
+    the level the data was generated with (noise-mismatch test)."""
     domains = np.asarray(split['meta']['domain'])
     sites = np.asarray(split['meta']['radar_site_xyz_m'], dtype=np.float64)
     final = np.empty((len(domains), 7))
@@ -113,8 +115,10 @@ def ukf_params(split, prior, q_accel, q_beta=0.0, beta_std=1.0, scaled_jitter=Fa
     for domain in sorted(set(domains.tolist())):
         idx = np.flatnonzero(domains == domain)
         sensor = split.get('protocol', {}).get('sensor', {}).get(domain, sensor_for_domain(domain))
+        if design_noise:
+            sensor = sensor_for_domain(domain)
         severity = sensor['severity']
-        if 'sensor_noise_scale' in split['meta']:  # --sensor-randomize data: the radar knows each track's noise level
+        if 'sensor_noise_scale' in split['meta'] and not design_noise:  # --sensor-randomize data: the radar knows each track's noise level
             severity = severity * np.asarray(split['meta']['sensor_noise_scale'], dtype=np.float64)[idx]
         angle_std = np.deg2rad(ANGLE_STD_DEG * severity)
         polar = split['polar'][idx]
@@ -182,6 +186,8 @@ def main():
                         help='With --anchor-model ukf: also save anchor_unc_<split>.npy (UKF uncertainty features)')
     parser.add_argument('--anchor-model', choices=('b4', 'b6', 'ukf'), default='b4',
                         help='With --anchors-only --report: anchors from B4, the selected B6 table, or the B5 UKF')
+    parser.add_argument('--design-noise', action='store_true',
+                        help='With --anchor-model ukf: the UKF assumes the design noise level, not the data level')
     parser.add_argument('--b5-fix', action='store_true',
                         help='B5 with beta-scaled UKF jitter and a validation-selected initial beta std')
     args = parser.parse_args()
@@ -252,7 +258,7 @@ def main():
             split = load(args.data_dir, name)
             params = None
             if args.anchor_model == 'ukf':
-                params = ukf_params(split, prior, **b5_cfg, unc=args.anchor_unc)
+                params = ukf_params(split, prior, **b5_cfg, unc=args.anchor_unc, design_noise=args.design_noise)
                 if args.anchor_unc:
                     params, features = params
                     np.save(Path(args.data_dir) / f'anchor_unc_{name}.npy', features.astype(np.float32))
