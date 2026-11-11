@@ -1,5 +1,5 @@
 """
-PAST-Mixer: Physics-Aware Spatio-Temporal Mixer for Ballistic Trajectory Prediction.
+PNMixer: pre-layer-normalized temporal-channel mixer backbone (PAST-Mixer in the original submission).
 
 This file contains the PAST-Mixer variants used in the manuscript. The selected
 paper model is the simple-temporal residual Mixer with a deterministic
@@ -434,7 +434,7 @@ class PASTMixerBlock(nn.Module):
 
 class Model(nn.Module):
     """
-    PAST-Mixer: Physics-Aware Spatio-Temporal Mixer.
+    PNMixer: pre-layer-normalized temporal-channel mixer backbone.
     Predicts ballistic trajectories by combining an optional quadratic
     kinematic baseline with a learned temporal/channel residual. The selected
     manuscript model uses the simple temporal mixer and a learned scalar prior
