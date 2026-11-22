@@ -160,7 +160,7 @@ def ukf_params(split, prior, q_accel, q_beta=0.0, beta_std=1.0, scaled_jitter=Fa
             continue
         final[idx], cov, nis = out
         var = np.einsum('nii->ni', cov)
-        features[idx] = np.log(np.stack([np.sqrt(var[:, 6]) / prior['std'], np.sqrt(var[:, :3].mean(1)),
+        features[idx] = np.log(np.stack([np.sqrt(var[:, 6]) * drag_scale(final[idx], model) / prior['std'], np.sqrt(var[:, :3].mean(1)),
                                          np.sqrt(var[:, 3:6].mean(1)), np.nan_to_num(nis, nan=3.0)], axis=1))
     return (final, features) if unc else final
 
@@ -177,9 +177,25 @@ def truth(split, horizon):
     return split['X'][:, window:window + horizon]
 
 
+def b7_settings(path, stored):
+    """run_b5 keyword arguments from a B7 selection."""
+    s = json.loads(Path(path).read_text(encoding='utf-8'))['selected']
+    std = stored['beta_prior_std'][s['table']]['std']
+    return {'q_accel': s['q_accel'], 'q_beta': (s['beta_walk'] * std) ** 2, 'beta_std': s['beta_std'],
+            'scaled_jitter': True, 'model': s['table']}
+
+
 def run_b7(args):
     """Select and evaluate the standard-drag UKF; B5 is recomputed as a regression check."""
     stored = json.loads(Path(args.report).read_text(encoding='utf-8'))
+    if args.b7_report:  # Evaluate stored settings, e.g. on a stress set.
+        cfg = b7_settings(args.b7_report, stored)
+        test = load(args.data_dir, 'test')
+        pred = run_b5(test, stored['beta_prior_std'][cfg['model']], horizon=args.horizon, **cfg)
+        result = evaluate(pred, truth(test, args.horizon), test['valid_len'])
+        np.save(Path(args.out) / 'pred_B7_DragUKFStd.npy', pred.astype(np.float32))
+        print('B7', result['overall'], flush=True)
+        return
     val, test = load(args.data_dir, 'val'), load(args.data_dir, 'test')
     val_true, test_true = truth(val, args.horizon), truth(test, args.horizon)
     b5 = run_b5(test, stored['beta_prior'], horizon=args.horizon, **b5_settings(stored['selected'], stored['beta_prior']))
@@ -219,9 +235,10 @@ def main():
     parser.add_argument('--report', help='Reuse an existing beta prior and B4 selection for --anchors-only')
     parser.add_argument('--anchor-unc', action='store_true',
                         help='With --anchor-model ukf: also save anchor_unc_<split>.npy (UKF uncertainty features)')
-    parser.add_argument('--anchor-model', choices=('b4', 'b6', 'ukf'), default='b4',
+    parser.add_argument('--anchor-model', choices=('b4', 'b6', 'ukf', 'b7'), default='b4',
                         help='With --anchors-only --report: anchors from B4, the selected B6 table, or the B5 UKF')
     parser.add_argument('--b7', action='store_true', help='With --report: select and evaluate the standard-drag UKF')
+    parser.add_argument('--b7-report', help='Stored B7 selection: evaluate it with --b7, or use it with --anchor-model b7')
     parser.add_argument('--design-noise', action='store_true',
                         help='With --anchor-model ukf: the UKF assumes the design noise level, not the data level')
     parser.add_argument('--b5-fix', action='store_true',
@@ -249,6 +266,12 @@ def main():
             prior = stored['beta_prior_std'][anchor_model]
             best_noise = float(stored['selected']['B6_noise'])
         b5_cfg = b5_settings(stored['selected'], prior) if args.anchor_model == 'ukf' else None
+        if args.anchor_model == 'b7':
+            if not args.b7_report:
+                parser.error('--anchor-model b7 requires --b7-report')
+            b5_cfg = b7_settings(args.b7_report, stored)
+            anchor_model = b5_cfg['model']
+            prior = stored['beta_prior_std'][anchor_model]
     else:
         train = load(prior_dir, 'train')
         prior = beta_prior_from_train(train)
@@ -297,7 +320,7 @@ def main():
         for name in names:
             split = load(args.data_dir, name)
             params = None
-            if args.anchor_model == 'ukf':
+            if args.anchor_model in ('ukf', 'b7'):
                 params = ukf_params(split, prior, **b5_cfg, unc=args.anchor_unc, design_noise=args.design_noise)
                 if args.anchor_unc:
                     params, features = params
