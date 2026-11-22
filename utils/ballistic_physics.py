@@ -195,7 +195,7 @@ def _wrap(angle):
 
 
 def ukf_drag_track(polar, detected, sites, init_state, init_cov, severity, angle_std,
-                   q_accel=4.0, q_beta=1e-12, start=2, beta_scale=None, return_cov=False):
+                   q_accel=4.0, q_beta=1e-12, start=2, beta_scale=None, return_cov=False, model='const'):
     """Unscented Kalman filter on [p, v, beta] with polar measurements.
 
     ``init_state`` (N,7) and ``init_cov`` (N,7,7) describe the state at
@@ -231,7 +231,7 @@ def ukf_drag_track(polar, detected, sites, init_state, init_cov, severity, angle
         sigma = np.concatenate([x[:, None] + offsets, x[:, None] - offsets], axis=1)  # (N,14,7)
         flat = sigma.reshape(-1, dim)
         moved = np.empty_like(flat)
-        moved[:, :6] = rk4_step(flat[:, :6], flat[:, 6])
+        moved[:, :6] = rk4_step(flat[:, :6], flat[:, 6], model=model)
         moved[:, 6] = flat[:, 6]
         sigma = moved.reshape(n, 2 * dim, dim)
         x = sigma.mean(axis=1)

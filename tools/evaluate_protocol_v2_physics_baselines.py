@@ -11,6 +11,8 @@ the raw polar measurements of the same warm-up + window span the tracker uses.
   B5 Drag-UKF  UKF on [p, v, beta] with polar measurements, RK4 extrapolation
   B6 Drag-LS-Std as B4 with a standard drag function of Mach (G1 or G7) and an
                ISA atmosphere; own train prior; table and prior strength selected on val
+  B7 Drag-UKF-Std as B5 with the same standard drag functions and ISA atmosphere; table and
+               filter settings selected on val (--b7)
 
 The beta-prior strength (B4) and the UKF acceleration noise (B5) are selected
 on the validation split. B4 predictions for every split are saved as
@@ -94,14 +96,15 @@ def save_anchors(data_dir, name, split, prior, noise, horizon, model='const', pa
     print('anchors saved', name, anchor.shape, flush=True)
 
 
-def run_b5(split, prior, q_accel, horizon, q_beta=0.0, beta_std=1.0, scaled_jitter=False):
+def run_b5(split, prior, q_accel, horizon, q_beta=0.0, beta_std=1.0, scaled_jitter=False, model='const'):
     """B5 forecast; ``beta_std`` scales the initial beta std (the prior strength), and
     ``scaled_jitter`` scales the UKF Cholesky jitter of beta to the prior mean."""
-    final = ukf_params(split, prior, q_accel, q_beta, beta_std, scaled_jitter)
-    return integrate(final[:, :6], final[:, 6], horizon)
+    final = ukf_params(split, prior, q_accel, q_beta, beta_std, scaled_jitter, model=model)
+    return integrate(final[:, :6], final[:, 6], horizon, model=model)
 
 
-def ukf_params(split, prior, q_accel, q_beta=0.0, beta_std=1.0, scaled_jitter=False, unc=False, design_noise=False):
+def ukf_params(split, prior, q_accel, q_beta=0.0, beta_std=1.0, scaled_jitter=False, unc=False, design_noise=False,
+               model='const'):
     """Window-end [p, v, beta] (N,7) of the B5 Drag-UKF.
 
     ``unc=True`` also returns (N,4) log uncertainty features: posterior beta std over prior
@@ -145,11 +148,13 @@ def ukf_params(split, prior, q_accel, q_beta=0.0, beta_std=1.0, scaled_jitter=Fa
             p0[:, axis, axis] = coef_cov[:, 0, 0]
             p0[:, 3 + axis, 3 + axis] = coef_cov[:, 1, 1]
             p0[:, axis, 3 + axis] = p0[:, 3 + axis, axis] = coef_cov[:, 0, 1]
-        init[:, 6] = prior['mean']
-        p0[:, 6, 6] = (beta_std * prior['std']) ** 2
+        # A table prior describes the drag level beta * f(M), so convert it to beta at the initial Mach number.
+        scale = drag_scale(init, model)
+        init[:, 6] = prior['mean'] / scale
+        p0[:, 6, 6] = (beta_std * prior['std'] / scale) ** 2
         out = ukf_drag_track(polar, detected, sites[idx], init, p0, severity, angle_std,
                              q_accel=q_accel, q_beta=q_beta, start=init_steps,
-                             beta_scale=prior['mean'] if scaled_jitter else None, return_cov=unc)
+                             beta_scale=prior['mean'] if scaled_jitter else None, return_cov=unc, model=model)
         if not unc:
             final[idx] = out
             continue
@@ -172,6 +177,36 @@ def truth(split, horizon):
     return split['X'][:, window:window + horizon]
 
 
+def run_b7(args):
+    """Select and evaluate the standard-drag UKF; B5 is recomputed as a regression check."""
+    stored = json.loads(Path(args.report).read_text(encoding='utf-8'))
+    val, test = load(args.data_dir, 'val'), load(args.data_dir, 'test')
+    val_true, test_true = truth(val, args.horizon), truth(test, args.horizon)
+    b5 = run_b5(test, stored['beta_prior'], horizon=args.horizon, **b5_settings(stored['selected'], stored['beta_prior']))
+    b5_ade = evaluate(b5, test_true, test['valid_len'])['overall']['ade_m']
+    print('B5 regression ADE', b5_ade, flush=True)
+    scores = {}
+    for table in ('g1', 'g7'):
+        prior = stored['beta_prior_std'][table]
+        for q_accel in (0.01, 0.1, 1.0):
+            for walk in (0.0, 0.05, 0.2):
+                for beta_std in (0.5, 1.0, 2.0):
+                    pred = run_b5(val, prior, q_accel, args.horizon, (walk * prior['std']) ** 2, beta_std, True, table)
+                    scores[table, q_accel, walk, beta_std] = evaluate(pred, val_true, val['valid_len'])['overall']['ade_m']
+                    print(table, q_accel, walk, beta_std, round(scores[table, q_accel, walk, beta_std], 3), flush=True)
+    table, q_accel, walk, beta_std = min(scores, key=scores.get)
+    prior = stored['beta_prior_std'][table]
+    pred = run_b5(test, prior, q_accel, args.horizon, (walk * prior['std']) ** 2, beta_std, True, table)
+    result = evaluate(pred, test_true, test['valid_len'], test['meta'])
+    out = Path(args.out)
+    np.save(out / 'pred_B7_DragUKFStd.npy', pred.astype(np.float32))
+    (out / 'report_b7.json').write_text(json.dumps({
+        'selected': {'table': table, 'q_accel': q_accel, 'beta_walk': walk, 'beta_std': beta_std},
+        'b5_regression_ade_m': b5_ade, 'validation': {str(k): v for k, v in scores.items()}, 'test': result},
+        indent=2), encoding='utf-8')
+    print('selected', table, q_accel, walk, beta_std, 'val', scores[table, q_accel, walk, beta_std], 'test', result['overall'], flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--data-dir', required=True)
@@ -186,11 +221,16 @@ def main():
                         help='With --anchor-model ukf: also save anchor_unc_<split>.npy (UKF uncertainty features)')
     parser.add_argument('--anchor-model', choices=('b4', 'b6', 'ukf'), default='b4',
                         help='With --anchors-only --report: anchors from B4, the selected B6 table, or the B5 UKF')
+    parser.add_argument('--b7', action='store_true', help='With --report: select and evaluate the standard-drag UKF')
     parser.add_argument('--design-noise', action='store_true',
                         help='With --anchor-model ukf: the UKF assumes the design noise level, not the data level')
     parser.add_argument('--b5-fix', action='store_true',
                         help='B5 with beta-scaled UKF jitter and a validation-selected initial beta std')
     args = parser.parse_args()
+    if args.b7:
+        if not args.report:
+            parser.error('--b7 requires --report')
+        return run_b7(args)
     prior_dir = args.prior_dir or args.data_dir
     names = [name for name in ('train', 'val', 'test') if (Path(args.data_dir) / f'{name}.pt').exists()]
     if not names:
