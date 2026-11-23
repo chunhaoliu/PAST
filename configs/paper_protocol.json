@@ -13,7 +13,7 @@
     "generation_seed": 91
   },
   "anchor": {
-    "command": "tools/evaluate_protocol_v2_physics_baselines.py --b5-fix, then --anchors-only --report <report.json> --anchor-model ukf --anchor-unc",
+    "command": "tools/physics_baselines.py --b5-fix, then --anchors-only --report <report.json> --anchor-model ukf --anchor-unc",
     "ukf_white_noise_acceleration_m2_s3": 0.01,
     "ukf_drag_process_noise": 0.0
   },

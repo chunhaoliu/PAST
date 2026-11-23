@@ -9,12 +9,12 @@ import pytest
 import torch
 
 from data_provider.data_factory import data_provider
-from tools import evaluate_protocol_v2_physics_baselines as physics
+from tools import physics_baselines as physics
 from utils.ballistic_physics import DT, _window_residual, drag_window_trajectory, rk4_step
 
 
 def test_conformal_quantile_and_closed_disk_coverage():
-    from tools.conformal_protocol_v2 import conformal_quantile, region_summary, calibrate
+    from tools.impact_regions import conformal_quantile, region_summary, calibrate
 
     # n=10: finite-sample ranks are 10 (90%) and 9 (80%), without interpolation.
     scores = np.array([7., 2., 10., 1., 5., 9., 3., 6., 8., 4.])
@@ -170,7 +170,7 @@ def test_anchors_only_reuses_report_without_selection_or_evaluation(tmp_path, mo
 
 
 def test_paired_bootstrap_identical_and_weighted():
-    from tools.summarize_protocol_v2 import ade_totals, paired_bootstrap
+    from tools.summarize import ade_totals, paired_bootstrap
 
     true = np.zeros((3, 4, 3))
     pred = true.copy()
@@ -196,7 +196,7 @@ def test_paired_bootstrap_identical_and_weighted():
 
 
 def test_paired_impact_bootstrap_crossing_quantiles_and_resampling():
-    from tools.summarize_protocol_v2 import paired_impact_bootstrap
+    from tools.summarize import paired_impact_bootstrap
     from utils.metrics import evaluate, impact_metrics
 
     true = np.zeros((4, 4, 3))
@@ -246,7 +246,7 @@ def test_paired_impact_bootstrap_crossing_quantiles_and_resampling():
 
 
 def test_pooled_worst_class_bootstrap_recomputes_each_methods_maximum():
-    from tools.summarize_protocol_v2 import paired_pool_bootstrap
+    from tools.summarize import paired_pool_bootstrap
 
     lengths = {'a': np.array([1, 2]), 'b': np.array([2, 1])}
     left = {'a': {2021: {'totals': np.array([0., 18.]), 'impact': np.array([0., 9.])},
@@ -289,7 +289,7 @@ def test_pooled_worst_class_bootstrap_recomputes_each_methods_maximum():
 
 
 def test_signed_impact_components_use_existing_crossing_and_terminal_direction():
-    from tools.summarize_protocol_v2 import signed_impact_components
+    from tools.summarize import signed_impact_components
     from utils.metrics import impact_metrics
 
     true = np.array([[[0., 0., 3.], [1., 0., 1.], [1., 0., 0.]],
@@ -307,7 +307,7 @@ def test_signed_impact_components_use_existing_crossing_and_terminal_direction()
 
 
 def test_summary_arrays_prefix_wind_and_bootstrap(tmp_path, monkeypatch, capsys):
-    from tools import summarize_protocol_v2 as summary
+    from tools import summarize as summary
     from utils.metrics import evaluate, metric
 
     true = np.zeros((2, 3, 3), dtype=np.float32)

@@ -38,7 +38,7 @@ def data_provider(args, flag):
         anchor_path = os.path.join(data_dir, f'anchor_drag_{flag}.npy')
         if not os.path.exists(anchor_path):
             raise FileNotFoundError(
-                f'{anchor_path} missing; run tools/evaluate_protocol_v2_physics_baselines.py'
+                f'{anchor_path} missing; run tools/physics_baselines.py'
             )
         raw['anchor'] = np.load(anchor_path)
         if context_mode in ('fit', 'fit_unc'):

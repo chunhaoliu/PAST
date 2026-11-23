@@ -132,7 +132,7 @@ class BallisticDataset(Dataset):
             if anchor is None or anchor_fit_window is None or anchor_beta is None or beta_stats is None:
                 raise ValueError('anchor_context=fit requires anchor, fit window, beta and train beta statistics')
             if np.shape(anchor) != (len(data), self.pred_len, 3) or np.shape(anchor_fit_window) != (len(data), self.seq_len, 3):
-                raise ValueError('Anchor/context arrays do not match protocol v2 sample shapes')
+                raise ValueError('Anchor/context arrays do not match sample shapes')
             if np.shape(anchor_beta) != (len(data),):
                 raise ValueError('anchor_beta must contain one value per trajectory')
             std = self.scaler.std if self.scale else np.ones(3)

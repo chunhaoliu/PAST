@@ -1,4 +1,4 @@
-"""Inference-only impact-region feasibility for saved protocol-v2 ensembles."""
+"""Inference-only impact regions for saved ensembles, with variant selection on shifted validation."""
 import argparse
 import json
 import math
@@ -15,7 +15,7 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from tools.summarize_protocol_v2 import HOLD_CLASSES, ade_totals  # noqa: E402
+from tools.summarize import HOLD_CLASSES, ade_totals  # noqa: E402
 from utils.ballistic_physics import predicted_impact  # noqa: E402
 from utils.provenance import sha256_file  # noqa: E402
 
@@ -204,6 +204,31 @@ def calibrate(val, test, holdout=False):
     return result
 
 
+def select_variant(args):
+    """Calibrate on validation; on valS keep coverage >= 90%, take the smallest radius, else the highest coverage."""
+    global MODEL
+    seeds, result = list(range(2021, 2026)), {}
+    for MODEL in ('TSMixer', 'PASTMixer'):
+        val = load_ensemble(args.out / MODEL / 'main', args.data_dir, 'val', args.main_tag, seeds)
+        sets = {'valS': load_ensemble(args.main_out / 'valS', args.shift_data, 'test', args.main_tag, seeds),
+                'test': load_ensemble(args.main_out, args.data_dir, 'test', args.main_tag, seeds)}
+        rows = {name: {} for name in sets}
+        for variant, key in (('V0', None), ('V1', 'spread'), ('V2', 'correction')):
+            d = float(np.median(val[key])) if key else 0.0
+            q = conformal_quantile(val['error'] / (val[key] + d if key else 1.0), 0.1)
+            for name, data in sets.items():
+                radius = q * (data[key] + d if key else np.ones_like(data['error']))
+                row = region_summary(data['error'], radius)
+                rows[name][variant] = {k: row[k] for k in ('coverage', 'median_radius_m')}
+        shifted = rows['valS']
+        passing = [v for v in shifted if shifted[v]['coverage'] >= .9]
+        pick = (min(passing, key=lambda v: shifted[v]['median_radius_m']) if passing
+                else max(shifted, key=lambda v: shifted[v]['coverage']))
+        result[MODEL] = {'selected_on_valS': pick, 'coverage_radius_90': rows}
+    (args.out / 'region_selection.json').write_text(json.dumps(result, indent=2), encoding='utf-8')
+    print(json.dumps(result, indent=1))
+
+
 def write_summary(args, result):
     main = result['pools']['main']['variants']
     overall90 = [main[v]['levels']['90']['groups']['overall'] for v in ('V0', 'V1', 'V2')]
@@ -261,7 +286,7 @@ def write_summary(args, result):
                 f"{block['variants']['V1']['levels'][l]['groups'][group]['coverage'] * 100:.1f}" for l in levels) + ' |')
     lines += ['', '## Main-test accuracy', '',
               'Single-seed entries are mean ± sample std of each seed metric, not pooled errors. '
-              'Computed from the same saved arrays as outputs/main_v3/summary_class.md.', '',
+              'Computed from the same saved arrays as summary_class.md.', '',
               '| Metric (m) | Ensemble mean trajectory | Single-seed mean ± std |', '|---|---:|---:|']
     accuracy = result['main_accuracy']
     for key in ('ade_m', 'impact_median_m', 'impact_p90_m'):
@@ -274,16 +299,18 @@ def write_summary(args, result):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     base = ROOT.parent
-    parser.add_argument('--data-dir', type=Path, default=base / 'data/protocol_v2')
-    parser.add_argument('--hold-data', type=Path, default=base / 'data/protocol_v2_hold')
-    parser.add_argument('--main-out', type=Path, default=base / 'outputs/main_v3')
-    parser.add_argument('--hold-out', type=Path, default=base / 'outputs/hold_v3')
-    parser.add_argument('--out', type=Path, default=base / 'outputs/conf_v3')
+    parser.add_argument('--data-dir', type=Path, default=base / 'data/protocol_hf_ukf')
+    parser.add_argument('--hold-data', type=Path, default=base / 'data/protocol_hf_ukf_holdaero')
+    parser.add_argument('--main-out', type=Path, default=base / 'outputs/hf_ukf')
+    parser.add_argument('--hold-out', type=Path, default=base / 'outputs/hf_ukf/holdaero')
+    parser.add_argument('--out', type=Path, default=base / 'outputs/hf_ukf_conf')
     parser.add_argument('--main-tag', default='main', help='Main run prefix: main or best (tuned PAST-Mixer)')
-    parser.add_argument('--hold-tag', default='hold', help='Holdout run prefix: hold or holdaero')
+    parser.add_argument('--hold-tag', default='holdaero', help='Holdout run prefix')
     parser.add_argument('--infer', action='store_true', help='Reproduce one test run and infer all validation splits')
     parser.add_argument('--gpus', default='0,1')
     parser.add_argument('--model', default='PASTMixer', help='Backbone of the R5c runs')
+    parser.add_argument('--select', action='store_true', help='Select the region variant on --shift-data')
+    parser.add_argument('--shift-data', type=Path, default=base / 'data/protocol_hf_ukf_valS')
     args = parser.parse_args()
     global MODEL
     MODEL = args.model
@@ -293,6 +320,8 @@ def main():
            (args.data_dir, args.hold_data, args.main_out, args.hold_out)):
         parser.error('Output must be outside read-only source roots')
     args.out.mkdir(parents=True, exist_ok=True)
+    if args.select:
+        return select_variant(args)
     if args.infer:
         infer(args)
     result = {'reproduction': json.loads((args.out / 'reproduction.json').read_text(encoding='utf-8')), 'pools': {}}

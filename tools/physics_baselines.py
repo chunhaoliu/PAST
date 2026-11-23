@@ -1,4 +1,4 @@
-"""Model-based baselines on protocol v2 and the drag anchors used by residual learning.
+"""Model-based baselines and the drag anchors used by residual learning.
 
 All baselines use only what the networks see, except the UKF, which processes
 the raw polar measurements of the same warm-up + window span the tracker uses.
@@ -35,6 +35,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 import torch
+from scipy.stats import chi2
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.mixture import GaussianMixture
 
@@ -118,19 +119,21 @@ def run_b5(split, prior, q_accel, horizon, q_beta=0.0, beta_std=1.0, scaled_jitt
 
 
 def ukf_params(split, prior, q_accel, q_beta=0.0, beta_std=1.0, scaled_jitter=False, unc=False, design_noise=False,
-               model='const', loglik=False):
+               model='const', loglik=False, posterior=False):
     """Window-end [p, v, beta] (N,7) of the B5 Drag-UKF.
 
     ``unc=True`` also returns (N,4) log uncertainty features: posterior beta std over prior
     std, mean position std (m), mean velocity std (m/s), mean NIS of the window.
     ``design_noise=True`` makes the filter assume each domain's design noise level instead of
     the level the data was generated with (noise-mismatch test).
-    ``loglik=True`` also returns the (N,) innovation log-likelihood."""
+    ``loglik=True`` also returns the (N,) innovation log-likelihood.
+    ``posterior=True`` with ``unc=True`` also returns the (N,7,7) covariance and (N,) mean NIS."""
     domains = np.asarray(split['meta']['domain'])
     sites = np.asarray(split['meta']['radar_site_xyz_m'], dtype=np.float64)
     likelihood = np.empty(len(domains))
     final = np.empty((len(domains), 7))
     features = np.empty((len(domains), 4))
+    covariance, mean_nis = np.empty((len(domains), 7, 7)), np.empty(len(domains))
     for domain in sorted(set(domains.tolist())):
         idx = np.flatnonzero(domains == domain)
         sensor = split.get('protocol', {}).get('sensor', {}).get(domain, sensor_for_domain(domain))
@@ -179,11 +182,14 @@ def ukf_params(split, prior, q_accel, q_beta=0.0, beta_std=1.0, scaled_jitter=Fa
             final[idx] = out
             continue
         final[idx], cov, nis = out
+        covariance[idx], mean_nis[idx] = cov, nis
         var = np.einsum('nii->ni', cov)
         features[idx] = np.log(np.stack([np.sqrt(var[:, 6]) * drag_scale(final[idx], model) / prior['std'], np.sqrt(var[:, :3].mean(1)),
                                          np.sqrt(var[:, 3:6].mean(1)), np.nan_to_num(nis, nan=3.0)], axis=1))
     if loglik:
         return final, likelihood
+    if posterior:
+        return final, features, covariance, mean_nis
     return (final, features) if unc else final
 
 
@@ -391,6 +397,36 @@ def run_b9(args):
     print('B9', result['overall'], flush=True)
 
 
+def nees_rows(split, final, cov, nis):
+    """Consistency of the window-end UKF posterior against the clean state."""
+    clean = split['X']
+    truth6 = np.concatenate([clean[:, 99], (clean[:, 100] - clean[:, 98]) / (2 * DT)], axis=1)
+    error = truth6 - final[:, :6]
+    rows = {'n': len(error), 'mean_nis_per_3': float(np.nanmean(nis))}
+    for name, axes in (('position', [0, 1, 2]), ('velocity', [3, 4, 5]), ('position_velocity', list(range(6)))):
+        e, p = error[:, axes], cov[:, axes][:, :, axes]
+        q = np.einsum('ni,ni->n', e, np.linalg.solve(p, e[..., None])[..., 0])
+        dof, n = len(axes), len(q)
+        rows[name] = {'anees': float(q.mean()), 'dof': dof,
+                      'band95': [float(chi2.ppf(.025, n * dof) / n), float(chi2.ppf(.975, n * dof) / n)],
+                      'cover90': float(np.mean(q <= chi2.ppf(.9, dof)))}
+    return rows
+
+
+def run_nees(args):
+    stored = json.loads(Path(args.report).read_text())
+    prior, cfg = stored['beta_prior'], b5_settings(stored['selected'], stored['beta_prior'])
+    result = {}
+    for name in ('val', 'test'):
+        split = load(args.data_dir, name)
+        final, _, cov, nis = ukf_params(split, prior, unc=True, posterior=True, **cfg)
+        result[name] = nees_rows(split, final, cov, nis)
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / 'report_nees.json').write_text(json.dumps(result, indent=2), encoding='utf-8')
+    print(json.dumps(result['test'], indent=1))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--data-dir', required=True)
@@ -417,7 +453,12 @@ def main():
     parser.add_argument('--b9', action='store_true', help='With --report: fit, select and evaluate UKF-GBM')
     parser.add_argument('--b9-val-s', help='Sensor-shifted validation directory used to select UKF-GBM')
     parser.add_argument('--b9-model', help='Stored UKF-GBM model to evaluate on --data-dir')
+    parser.add_argument('--nees', action='store_true', help='With --report: UKF-Const NEES/NIS on val and test')
     args = parser.parse_args()
+    if args.nees:
+        if not args.report:
+            parser.error('--nees requires --report')
+        return run_nees(args)
     if args.b9:
         if not args.report or not (args.b9_val_s or args.b9_model):
             parser.error('--b9 requires --report and --b9-val-s or --b9-model')

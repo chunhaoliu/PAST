@@ -1,4 +1,4 @@
-"""Model-based ballistic predictors for protocol v2 (vectorized over trajectories).
+"""Model-based ballistic predictors (vectorized over trajectories).
 
 The drag model is generic: exponential standard atmosphere, a constant
 ballistic coefficient ``beta = Cd * A / m`` estimated from data, no wind and

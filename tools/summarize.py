@@ -1,4 +1,4 @@
-"""Recompute protocol v2 seed summaries and paired ADE bootstrap from saved arrays."""
+"""Recompute seed summaries and paired ADE bootstrap from saved arrays."""
 import argparse
 import json
 import re
@@ -309,7 +309,7 @@ def summarize_pool(args):
         for key, stat in paired_pool_bootstrap(left, right, lengths, n).items():
             lines.append(f"| {name} | {key} | {stat['difference']:.3f} | [{stat['ci_low']:.3f}, {stat['ci_high']:.3f}] |")
 
-    main, _, main_meta = load_pool_methods(runs_root if args.runs else root.parent / 'main_v3', Path(args.physics), Path(args.data_dir),
+    main, _, main_meta = load_pool_methods(runs_root if args.runs else root.parent, Path(args.physics), Path(args.data_dir),
                                           'main_', ('B4_DragLS', 'R5c:PASTMixer'), range(2021, 2026))
     lines += ['', '## Signed impact error mechanism', '',
               'All entries are trajectory means within a class, then seed mean ± sample std '
@@ -361,8 +361,8 @@ def main():
     parser.add_argument('--physics-methods', default='', help='Comma-separated physics methods; default: all')
     parser.add_argument('--report', help='Write only Markdown to this path instead of the default Markdown/JSON outputs')
     parser.add_argument('--pool-holdout', help='Pool four holdouts under this root into summary_pool.md; --data-dir/--physics locate main-test references; --bootstrap defaults to 2000')
-    parser.add_argument('--runs', help='For --pool-holdout: directory whose results/ holds holdout and main runs (default: holdout root and ../main_v3)')
-    parser.add_argument('--pool-tag', default='hold', help='Holdout tag for --pool-holdout: data protocol_v2_<tag>/<cls>, runs <tag><cls>_')
+    parser.add_argument('--runs', help='For --pool-holdout: directory whose results/ holds holdout and main runs (default: holdout root and its parent)')
+    parser.add_argument('--pool-tag', default='holdaero', help='Holdout tag for --pool-holdout: data <data-dir>_<tag>/<cls>, runs <tag><cls>_')
     args = parser.parse_args()
     if args.bootstrap < 0:
         parser.error('--bootstrap must be nonnegative')

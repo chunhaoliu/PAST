@@ -12,11 +12,11 @@ On the paper's high-fidelity benchmark, PAST-TSMixer reaches 17.5 m average disp
 |---|---|
 | `utils/radar.py` | Polar radar measurements, converted-measurement CA Kalman tracker, sensor-randomized re-observation (`radar_track_window(..., sensor_rng=...)`) |
 | `utils/ballistic_physics.py` | Drag point-mass model, RK4, drag-UKF (`ukf_drag_track`), physical baselines |
-| `tools/evaluate_protocol_v2_physics_baselines.py` | Baselines B1-B6, drag-UKF anchors and posterior (uncertainty) features |
+| `tools/physics_baselines.py` | Baselines B1-B6, drag-UKF anchors and posterior (uncertainty) features |
 | `data_provider/` | Kinematic descriptors, anchor context, uncertainty features, train-only normalization |
 | `models/` | TSMixer, PNMixer (`--model PASTMixer`), Transformer, TimeMixer, LSTM, iTransformer behind one residual interface; CE-LSTM comparison |
 | `exp/`, `run.py` | Training with the masked physical-unit loss (RMSE + 0.5 ADE) and evaluation |
-| `tools/summarize_protocol_v2.py`, `tools/conformal_protocol_v2.py` | Paired bootstrap confidence intervals; split-conformal impact regions |
+| `tools/summarize.py`, `tools/impact_regions.py` | Paired bootstrap confidence intervals; split-conformal impact regions |
 | `configs/paper_protocol.json` | Paper settings: benchmark, anchor, training flags, forecasting stages, backbone sizes, seeds |
 
 The benchmark trajectory generator and the generated benchmark data are not part of this release. `scripts/generate_demo_data.py` produces generic, non-operational trajectories in the same file format so that the full pipeline can be run end to end.
@@ -35,9 +35,9 @@ Python 3.10 or later; a CUDA GPU is optional.
 # 1. Generic demo data with sensor-randomized re-observation of the training split
 python scripts/generate_demo_data.py --output data/demo --reobserve
 # 2. Physical baselines B1-B6 and validation selection of the UKF settings
-python tools/evaluate_protocol_v2_physics_baselines.py --data-dir data/demo --out results/demo_physics --horizon 500 --b5-fix
+python tools/physics_baselines.py --data-dir data/demo --out results/demo_physics --horizon 500 --b5-fix
 # 3. Drag-UKF anchors and uncertainty features for every split
-python tools/evaluate_protocol_v2_physics_baselines.py --data-dir data/demo --out results/demo_physics --horizon 500 --anchors-only --report results/demo_physics/report.json --anchor-model ukf --anchor-unc
+python tools/physics_baselines.py --data-dir data/demo --out results/demo_physics --horizon 500 --anchors-only --report results/demo_physics/report.json --anchor-model ukf --anchor-unc
 # 4. PAST-TSMixer (small width for a CPU run)
 python run.py --dataset_dir data/demo --seq_len 100 --label_len 0 --pred_len 500 --model TSMixer --d_model 64 --d_ff 128 --e_layers 2 --train_epochs 5 --patience 5 --batch_size 32 --input_state kinematics --output_mode physics_anchor --anchor_context fit_unc --loss_mode physical_composite --ade_loss_weight 0.5 --fde_loss_weight 0 --select_metric val_rmse_m --residual_gate none --use_gpu 0 --model_id demo
 ```
