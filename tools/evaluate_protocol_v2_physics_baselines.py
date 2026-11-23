@@ -15,6 +15,8 @@ the raw polar measurements of the same warm-up + window span the tracker uses.
                filter settings selected on val (--b7)
   B8 Drag-MM-UKF static multiple-model bank of B5 or B7 filters over an unlabeled Gaussian
                mixture of training drag levels; all settings selected on val (--b8)
+  B9 UKF-GBM   B5 end state with drag debiased by gradient boosting on the filter outputs;
+               trained on re-observed data and selected on val + valS RMSE (--b9)
 
 The beta-prior strength (B4) and the UKF acceleration noise (B5) are selected
 on the validation split. B4 predictions for every split are saved as
@@ -27,11 +29,13 @@ import json
 import os
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 
+import joblib
 import numpy as np
 import torch
+from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.mixture import GaussianMixture
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -314,6 +318,79 @@ def run_b8_baseline(args):
     print('selected', {k: v for k, v in selected.items() if k != 'modes'}, 'test', result['overall'], flush=True)
 
 
+def b9_inputs(final, features):
+    """Filter outputs only: log drag, uncertainty features, speed, height, flight-path sine."""
+    speed = np.linalg.norm(final[:, 3:6], axis=1)
+    return np.column_stack([np.log(np.maximum(final[:, 6], 1e-6)), features, speed, final[:, 2], final[:, 5] / speed])
+
+
+def b9_forecast(final, log_ratio, horizon):
+    return integrate(final[:, :6], np.maximum(final[:, 6], 1e-6) * np.exp(log_ratio), horizon)
+
+
+def b9_target(final, future, valid_len, workers=8, batch=3000):
+    """Log ratio of the constant drag that best fits the clean future from the UKF end state."""
+    grid = np.geomspace(0.4, 2.5, 41)
+    horizon = future.shape[1]
+    mask = np.arange(horizon)[None] < valid_len[:, None]
+    beta = np.maximum(final[:, 6], 1e-6)
+
+    def fit(index):
+        error = np.empty((len(index), len(grid)))
+        for j, ratio in enumerate(grid):
+            pred = integrate(final[index, :6], beta[index] * ratio, horizon)
+            error[:, j] = (np.linalg.norm(pred - future[index], axis=-1) * mask[index]).sum(1) / valid_len[index]
+        return index, grid[error.argmin(1)]
+
+    target = np.empty(len(final))
+    with ThreadPoolExecutor(workers) as pool:
+        for index, ratio in pool.map(fit, np.array_split(np.arange(len(final)), max(1, len(final) // batch))):
+            target[index] = ratio
+    return np.log(target)
+
+
+def run_b9(args):
+    """Fit and select UKF-GBM, or evaluate a stored model with --b9-model."""
+    stored = json.loads(Path(args.report).read_text(encoding='utf-8'))
+    prior, cfg = stored['beta_prior'], b5_settings(stored['selected'], stored['beta_prior'])
+    out = Path(args.out)
+
+    def filtered(data_dir, name):
+        split = load(data_dir, name)
+        final, features = ukf_params(split, prior, unc=True, **cfg)
+        return split, final, features, b9_inputs(final, features)
+
+    if args.b9_model:
+        model = joblib.load(args.b9_model)
+    else:
+        train, final, _, x = filtered(args.data_dir, 'train')
+        y = b9_target(final, truth(train, args.horizon).astype(np.float32), train['valid_len'], args.b8_workers)
+        del train
+        checks = [filtered(args.data_dir, 'val'), filtered(args.b9_val_s, 'test')]
+        scores = {}
+        for depth in (6, 8, 12, None):
+            for lr in (.05, .1, .2):
+                for iters in (400, 800, 1600):
+                    candidate = HistGradientBoostingRegressor(max_depth=depth, max_iter=iters, learning_rate=lr,
+                                                              random_state=0).fit(x, y)
+                    scores[depth, iters, lr] = float(np.mean([evaluate(
+                        b9_forecast(c[1], candidate.predict(c[3]), args.horizon), truth(c[0], args.horizon),
+                        c[0]['valid_len'])['overall']['rmse'] for c in checks]))
+                    print(depth, iters, lr, round(scores[depth, iters, lr], 3), flush=True)
+        depth, iters, lr = min(scores, key=scores.get)
+        model = HistGradientBoostingRegressor(max_depth=depth, max_iter=iters, learning_rate=lr, random_state=0).fit(x, y)
+        joblib.dump(model, out / 'model_b9.joblib')
+    test, final, _, x = filtered(args.data_dir, 'test')
+    pred = b9_forecast(final, model.predict(x), args.horizon)
+    result = evaluate(pred, truth(test, args.horizon), test['valid_len'], test['meta'])
+    np.save(out / 'pred_B9_DragGBMUKF.npy', pred.astype(np.float32))
+    if not args.b9_model:
+        (out / 'report_b9.json').write_text(json.dumps({
+            'selected': {'max_depth': depth, 'max_iter': iters, 'learning_rate': lr}, 'criterion': scores[depth, iters, lr],
+            'validation': {str(k): v for k, v in scores.items()}, 'test': result}, indent=2), encoding='utf-8')
+    print('B9', result['overall'], flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--data-dir', required=True)
@@ -337,7 +414,14 @@ def main():
     parser.add_argument('--b8', action='store_true', help='Select and evaluate the multiple-model UKF bank')
     parser.add_argument('--b8-report', help='Stored B8 selection to evaluate on --data-dir')
     parser.add_argument('--b8-workers', type=int, default=8)
+    parser.add_argument('--b9', action='store_true', help='With --report: fit, select and evaluate UKF-GBM')
+    parser.add_argument('--b9-val-s', help='Sensor-shifted validation directory used to select UKF-GBM')
+    parser.add_argument('--b9-model', help='Stored UKF-GBM model to evaluate on --data-dir')
     args = parser.parse_args()
+    if args.b9:
+        if not args.report or not (args.b9_val_s or args.b9_model):
+            parser.error('--b9 requires --report and --b9-val-s or --b9-model')
+        return run_b9(args)
     if args.b8:
         return run_b8_baseline(args)
     if args.b7:
