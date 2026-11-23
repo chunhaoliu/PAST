@@ -12,11 +12,8 @@ def _configs(model, input_state='model_default', output_mode='model_default', **
     args = argparse.Namespace(
         task_name='ballistic_forecast', model=model, seq_len=20, pred_len=30, label_len=0,
         enc_in=3, dec_in=3, c_out=3, d_model=16, d_ff=32, n_heads=2, e_layers=1, d_layers=1,
-        dropout=0.0, alpha=0.9, activation='gelu', dt=0.01,
-        use_physics=0, physics_mode='none', physics_gate_mode='scalar', physics_gate_max=1.0,
-        physics_gate_delta_max=0.2, past_temporal_mode='simple', past_norm_mode='pre',
-        past_output_mode='displacement', past_state_mode='kinematics', past_state_lag=5,
-        physics_fusion_mode='additive', freeze_backbone=0, pretrained_backbone_checkpoint='',
+        dropout=0.0, alpha=0.9, activation='gelu', dt=0.01, past_norm_mode='pre',
+        past_output_mode='displacement', past_state_mode='kinematics', past_state_lag=5, freeze_backbone=0, pretrained_backbone_checkpoint='',
         input_state=input_state, output_mode=output_mode,
     )
     for key, value in extra.items():
@@ -148,7 +145,7 @@ def test_fit_context_is_in_backbone_state_and_affects_prediction(model, input_st
     seen = {}
     def capture(module, inputs):
         seen['state'] = inputs[0]
-    module = net.backbone.state_norm if model == 'PASTMixer' else net.backbone
+    module = net.backbone.kinematic_state_encoder if model == 'PASTMixer' else net.backbone
     handle = module.register_forward_pre_hook(capture)
     y = net(x, anchor=anchor, context=context)
     handle.remove()

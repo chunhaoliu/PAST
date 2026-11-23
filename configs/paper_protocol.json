@@ -40,8 +40,6 @@
     "32",
     "--lradj",
     "type3",
-    "--past_temporal_mode",
-    "simple",
     "--past_norm_mode",
     "pre",
     "--past_state_lag",

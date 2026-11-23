@@ -105,39 +105,6 @@ def test_dataset_context_scaling_filtering_and_train_only_beta(tmp_path, scale):
                                rtol=1e-5, atol=1e-5)
 
 
-def test_pastmixer_anchor_film_starts_as_unconditioned_model():
-    from models.PASTMixer import Model
-    base = dict(task_name='ballistic_forecast', seq_len=20, pred_len=30, enc_in=3, c_out=3, d_model=16, d_ff=32,
-                e_layers=2, dropout=0.0, context_channels=10)
-    torch.manual_seed(0)
-    plain = Model(SimpleNamespace(**base)).eval()
-    torch.manual_seed(0)
-    film = Model(SimpleNamespace(**base, past_anchor_film=1)).eval()
-    film.load_state_dict(plain.state_dict(), strict=False)
-    x, ctx = torch.randn(4, 20, 3), torch.randn(4, 20, 10)
-    torch.testing.assert_close(film(x, None, None, None, context=ctx), plain(x, None, None, None, context=ctx))
-    with pytest.raises(ValueError):
-        Model(SimpleNamespace(**{**base, 'context_channels': 0}, past_anchor_film=1))
-
-
-def test_pastmixer_time_basis_is_orthonormal_and_optional():
-    from models.PASTMixer import Model
-    base = dict(task_name='ballistic_forecast', seq_len=20, pred_len=30, enc_in=3, c_out=3, d_model=16, d_ff=32,
-                e_layers=2, dropout=0.0, context_channels=10, past_temporal_mode='simple')
-    torch.manual_seed(0)
-    plain = Model(SimpleNamespace(**base)).eval()
-    torch.manual_seed(0)
-    off = Model(SimpleNamespace(**base, past_time_basis=0)).eval()
-    x, ctx = torch.randn(4, 20, 3), torch.randn(4, 20, 10)
-    torch.testing.assert_close(off(x, None, None, None, context=ctx), plain(x, None, None, None, context=ctx))
-    model = Model(SimpleNamespace(**base, past_time_basis=6, past_anchor_film=1)).eval()
-    torch.testing.assert_close(model.time_basis.T @ model.time_basis, torch.eye(6), atol=1e-5, rtol=0)
-    assert model(x, None, None, None, context=ctx).shape == (4, 30, 3)
-    assert 'time_basis' not in model.state_dict()
-    with pytest.raises(ValueError):
-        Model(SimpleNamespace(**{**base, 'past_temporal_mode': 'multiscale'}, past_time_basis=6))
-
-
 def test_anchors_only_reuses_report_without_selection_or_evaluation(tmp_path, monkeypatch):
     report = {'beta_prior': {'mean': 1e-4, 'std': 3e-5}, 'selected': {'B4_noise': 4.}}
     path = tmp_path / 'report.json'

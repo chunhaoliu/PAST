@@ -69,18 +69,6 @@ def parse_args():
                         help='CELSTM only: closed-loop rollout or direct horizon head')
     parser.add_argument('--celstm_head_width', type=int, default=6,
                         help='CELSTM only: hidden width of the FC-sigmoid-FC head (paper: 6)')
-    parser.add_argument('--use_physics', type=int, default=0, help='Enable physics residual baseline in PASTMixer')
-    parser.add_argument('--physics_mode', type=str, default='none', help='Physics baseline mode: none, learned, kinematic')
-    parser.add_argument('--physics_gate_mode', type=str, default='scalar',
-                        choices=['scalar', 'adaptive', 'conservative_adaptive'],
-                        help='PASTMixer physics baseline gate: scalar, adaptive, or conservative_adaptive')
-    parser.add_argument('--physics_gate_max', type=float, default=1.0,
-                        help='Maximum multiplier applied to the physics baseline gate')
-    parser.add_argument('--physics_gate_delta_max', type=float, default=0.2,
-                        help='Maximum per-axis adaptive correction for conservative_adaptive physics gate')
-    parser.add_argument('--past_temporal_mode', type=str, default='simple',
-                        choices=['multiscale', 'simple'],
-                        help='PASTMixer temporal mixer for ablations')
     parser.add_argument('--past_norm_mode', type=str, default='pre',
                         choices=['none', 'pre'],
                         help='PASTMixer state normalization before mixing')
@@ -90,15 +78,8 @@ def parse_args():
     parser.add_argument('--past_state_mode', type=str, default='kinematics',
                         choices=['position', 'kinematics'],
                         help='PASTMixer observed-state representation')
-    parser.add_argument('--past_anchor_film', type=int, default=0,
-                        help='PAST-Mixer: condition every block (FiLM) and scale the residual on trajectory-level '
-                             'anchor features (beta [+ UKF uncertainty]); needs --anchor_context fit/fit_unc')
-    parser.add_argument('--past_time_basis', type=int, default=0,
-                        help='PAST-Mixer: >0 projects the embedded time axis onto K orthonormal Legendre '
-                             'polynomials before the mixer blocks; 0 = off')
     parser.add_argument('--past_state_lag', type=int, default=5,
                         help='Finite-difference lag for kinematic features')
-    parser.add_argument('--physics_fusion_mode', type=str, default='additive')
     parser.add_argument('--freeze_backbone', type=int, default=0)
     parser.add_argument('--pretrained_backbone_checkpoint', type=str, default='')
     parser.add_argument('--activation', type=str, default='gelu')
@@ -190,12 +171,7 @@ def main():
     print('Ballistic Trajectory Prediction')
     print('=' * 60)
     print(f'Model: {args.model}, seq_len={args.seq_len}, pred_len={args.pred_len}, d_model={args.d_model}')
-    print(
-        f'Layers: {args.e_layers}, epochs={args.train_epochs}, '
-        f'use_physics={args.use_physics}, physics_mode={args.physics_mode}, '
-        f'physics_gate_mode={args.physics_gate_mode}, physics_gate_max={args.physics_gate_max}, '
-        f'physics_gate_delta_max={args.physics_gate_delta_max}'
-    )
+    print(f'Layers: {args.e_layers}, epochs={args.train_epochs}')
     print('=' * 60 + '\n')
 
     from exp.exp_ballistic import Exp_Ballistic

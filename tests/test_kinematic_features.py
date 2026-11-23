@@ -40,17 +40,10 @@ class KinematicFeatureTests(unittest.TestCase):
             d_ff=32,
             e_layers=1,
             dropout=0.0,
-            past_temporal_mode='simple',
             past_norm_mode='pre',
             past_output_mode='displacement',
             past_state_lag=2,
             dt=0.1,
-            use_physics=0,
-            physics_mode='none',
-            physics_gate_mode='scalar',
-            physics_gate_max=1.0,
-            physics_gate_delta_max=0.2,
-            physics_fusion_mode='additive',
         )
         kinematic = Model(type('Config', (), {**common, 'past_state_mode': 'kinematics'}))
         position = Model(type('Config', (), {**common, 'past_state_mode': 'position'}))
