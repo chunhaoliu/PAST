@@ -12,7 +12,7 @@ On the paper's high-fidelity benchmark, PAST-TSMixer reaches 17.5 m average disp
 |---|---|
 | `utils/radar.py` | Polar radar measurements, converted-measurement CA Kalman tracker, sensor-randomized re-observation (`radar_track_window(..., sensor_rng=...)`) |
 | `utils/ballistic_physics.py` | Drag point-mass model, RK4, drag-UKF (`ukf_drag_track`), physical baselines |
-| `tools/physics_baselines.py` | Baselines B1-B6, drag-UKF anchors and posterior (uncertainty) features |
+| `tools/physics_baselines.py` | Baselines B1-B6, UKF-G (`--b7`), MM-UKF-G (`--b8`), UKF-GBM (`--b9`), drag-UKF anchors and posterior (uncertainty) features |
 | `data_provider/` | Kinematic descriptors, anchor context, uncertainty features, train-only normalization |
 | `models/` | TSMixer, PNMixer (`--model PASTMixer`), Transformer, TimeMixer, LSTM, iTransformer behind one residual interface; CE-LSTM comparison |
 | `exp/`, `run.py` | Training with the masked physical-unit loss (RMSE + 0.5 ADE) and evaluation |
