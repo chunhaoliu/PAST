@@ -194,8 +194,21 @@ def _wrap(angle):
     return (angle + np.pi) % (2.0 * np.pi) - np.pi
 
 
+def _repair_cov(p, jitter):
+    """Positive-definite covariance: rows that fail get their correlation eigenvalues floored."""
+    sym = 0.5 * (p + np.swapaxes(p, 1, 2)) + jitter
+    scale = np.sqrt(np.maximum(np.einsum('nii->ni', sym), np.diag(jitter)))
+    corr = sym / (scale[:, None] * scale[..., None])
+    value, vector = np.linalg.eigh(corr)
+    bad = value.min(axis=1) <= 1e-8
+    fixed = (vector[bad] * np.maximum(value[bad], 1e-8)[:, None]) @ np.swapaxes(vector[bad], 1, 2)
+    sym[bad] = fixed * scale[bad, None] * scale[bad, :, None]
+    return sym, bad
+
+
 def ukf_drag_track(polar, detected, sites, init_state, init_cov, severity, angle_std,
-                   q_accel=4.0, q_beta=1e-12, start=2, beta_scale=None, return_cov=False, model='const'):
+                   q_accel=4.0, q_beta=1e-12, start=2, beta_scale=None, return_cov=False, model='const',
+                   return_loglik=False):
     """Unscented Kalman filter on [p, v, beta] with polar measurements.
 
     ``init_state`` (N,7) and ``init_cov`` (N,7,7) describe the state at
@@ -208,6 +221,8 @@ def ukf_drag_track(polar, detected, sites, init_state, init_cov, severity, angle
 
     ``return_cov=True`` also returns the window-end covariance (N,7,7) and the
     mean normalized innovation squared over detected samples (N,; NaN if none).
+    ``return_loglik=True`` instead returns the mean state and the summed Gaussian
+    innovation log-likelihood (N,), used to weight a multiple-model filter bank.
     """
     n, steps, _ = polar.shape
     dim = 7
@@ -224,9 +239,28 @@ def ukf_drag_track(polar, detected, sites, init_state, init_cov, severity, angle
     if beta_scale is not None:
         jitter[6, 6] *= beta_scale**2
     nis_sum, nis_count = np.zeros(n), np.zeros(n)
+    loglik = np.zeros(n)
+    repaired = np.zeros(n, dtype=bool)
     severity, angle_std = np.broadcast_to(severity, (n,)), np.broadcast_to(angle_std, (n,))  # scalar or per track
+    good_x, dead = x.copy(), np.zeros(n, dtype=bool)
+
+    def plausible(state, cov):
+        return (np.isfinite(state).all(axis=1) & np.isfinite(cov).all(axis=(1, 2))
+                & (np.linalg.norm(np.nan_to_num(state[:, :3]), axis=1) < 1e6)
+                & (np.linalg.norm(np.nan_to_num(state[:, 3:6]), axis=1) < 3000.0))
+
     for step in range(start, steps):
-        chol = np.linalg.cholesky(0.5 * (p + np.swapaxes(p, 1, 2)) + jitter)
+        valid = plausible(x, p)
+        good_x[valid] = x[valid]
+        try:
+            chol = np.linalg.cholesky(0.5 * (p + np.swapaxes(p, 1, 2)) + jitter)
+        except np.linalg.LinAlgError:  # Reached only under extreme sensor degradation.
+            # A diverged track keeps its last plausible state and receives no further updates.
+            dead |= ~valid
+            x[~valid], p[~valid] = good_x[~valid], jitter
+            sym, bad = _repair_cov(p, jitter)
+            repaired |= bad | dead
+            chol = np.linalg.cholesky(sym)
         offsets = np.sqrt(dim) * np.swapaxes(chol, 1, 2)  # rows are columns of chol
         sigma = np.concatenate([x[:, None] + offsets, x[:, None] - offsets], axis=1)  # (N,14,7)
         flat = sigma.reshape(-1, dim)
@@ -237,7 +271,7 @@ def ukf_drag_track(polar, detected, sites, init_state, init_cov, severity, angle
         x = sigma.mean(axis=1)
         dev = sigma - x[:, None]
         p = weight * np.einsum('nki,nkj->nij', dev, dev) + q
-        hit = detected[:, step]
+        hit = detected[:, step] & ~dead
         if not np.any(hit):
             continue
         zs = _polar_of(sigma[hit], sites_b[hit])
@@ -257,9 +291,20 @@ def ukf_drag_track(polar, detected, sites, init_state, init_cov, severity, angle
         if return_cov:
             nis_sum[hit] += np.einsum('ni,ni->n', innovation, np.linalg.solve(s, innovation[..., None])[..., 0])
             nis_count[hit] += 1
+        if return_loglik:
+            quad = np.einsum('ni,ni->n', innovation, np.linalg.solve(s, innovation[..., None])[..., 0])
+            loglik[hit] -= 0.5 * (quad + np.linalg.slogdet(s)[1] + 3.0 * np.log(2.0 * np.pi))
         x[hit] = x[hit] + np.einsum('nij,nj->ni', gain, innovation)
         p[hit] = p[hit] - gain @ s @ np.swapaxes(gain, 1, 2)
         x[:, 6] = np.maximum(x[:, 6], 0.0)
+    lost = ~(np.isfinite(x).all(axis=1) & np.isfinite(p).all(axis=(1, 2)))
+    if lost.any():
+        x[lost], p[lost] = good_x[lost], jitter
+        dead |= lost
+    if repaired.any() or dead.any():
+        print(f'UKF covariance repaired on {int(repaired.sum())} and diverged on {int(dead.sum())} of {n} tracks', flush=True)
+    if return_loglik:
+        return x, np.nan_to_num(loglik, nan=-1e12, posinf=-1e12, neginf=-1e12)
     if return_cov:
         with np.errstate(invalid='ignore', divide='ignore'):
             return x, p, nis_sum / nis_count

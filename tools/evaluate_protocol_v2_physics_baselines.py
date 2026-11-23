@@ -13,6 +13,8 @@ the raw polar measurements of the same warm-up + window span the tracker uses.
                ISA atmosphere; own train prior; table and prior strength selected on val
   B7 Drag-UKF-Std as B5 with the same standard drag functions and ISA atmosphere; table and
                filter settings selected on val (--b7)
+  B8 Drag-MM-UKF static multiple-model bank of B5 or B7 filters over an unlabeled Gaussian
+               mixture of training drag levels; all settings selected on val (--b8)
 
 The beta-prior strength (B4) and the UKF acceleration noise (B5) are selected
 on the validation split. B4 predictions for every split are saved as
@@ -22,12 +24,15 @@ with ``anchor_fit_window_<split>.npy`` (N, 100, 3) and ``anchor_beta_<split>.npy
 """
 import argparse
 import json
+import os
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
 import torch
+from sklearn.mixture import GaussianMixture
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -56,6 +61,13 @@ def load(data_dir, split):
 
 
 def beta_prior_from_train(train, n=1500, seed=0, model='const'):
+    """Summary of the per-trajectory best constant beta on clean training data."""
+    best = beta_samples(train, n, seed, model)
+    return {'mean': float(best.mean()), 'std': float(best.std()), 'median': float(np.median(best)),
+            'p05': float(np.percentile(best, 5)), 'p95': float(np.percentile(best, 95)), 'n': int(len(best))}
+
+
+def beta_samples(train, n=1500, seed=0, model='const'):
     """Per-trajectory best constant beta on clean training data (window end + 5 s)."""
     rng = np.random.default_rng(seed)
     index = rng.choice(len(train['X']), size=min(n, len(train['X'])), replace=False)
@@ -69,9 +81,7 @@ def beta_prior_from_train(train, n=1500, seed=0, model='const'):
     for j, beta in enumerate(grid):
         pred = integrate(state, np.full(len(index), beta), horizon, model=model)
         err[:, j] = np.linalg.norm(pred - target, axis=-1).mean(-1)
-    best = grid[err.argmin(axis=1)] * drag_scale(state, model)
-    return {'mean': float(best.mean()), 'std': float(best.std()), 'median': float(np.median(best)),
-            'p05': float(np.percentile(best, 5)), 'p95': float(np.percentile(best, 95)), 'n': int(len(index))}
+    return grid[err.argmin(axis=1)] * drag_scale(state, model)
 
 
 def run_b4(split, prior, noise, horizon, model='const'):
@@ -104,15 +114,17 @@ def run_b5(split, prior, q_accel, horizon, q_beta=0.0, beta_std=1.0, scaled_jitt
 
 
 def ukf_params(split, prior, q_accel, q_beta=0.0, beta_std=1.0, scaled_jitter=False, unc=False, design_noise=False,
-               model='const'):
+               model='const', loglik=False):
     """Window-end [p, v, beta] (N,7) of the B5 Drag-UKF.
 
     ``unc=True`` also returns (N,4) log uncertainty features: posterior beta std over prior
     std, mean position std (m), mean velocity std (m/s), mean NIS of the window.
     ``design_noise=True`` makes the filter assume each domain's design noise level instead of
-    the level the data was generated with (noise-mismatch test)."""
+    the level the data was generated with (noise-mismatch test).
+    ``loglik=True`` also returns the (N,) innovation log-likelihood."""
     domains = np.asarray(split['meta']['domain'])
     sites = np.asarray(split['meta']['radar_site_xyz_m'], dtype=np.float64)
+    likelihood = np.empty(len(domains))
     final = np.empty((len(domains), 7))
     features = np.empty((len(domains), 4))
     for domain in sorted(set(domains.tolist())):
@@ -154,7 +166,11 @@ def ukf_params(split, prior, q_accel, q_beta=0.0, beta_std=1.0, scaled_jitter=Fa
         p0[:, 6, 6] = (beta_std * prior['std'] / scale) ** 2
         out = ukf_drag_track(polar, detected, sites[idx], init, p0, severity, angle_std,
                              q_accel=q_accel, q_beta=q_beta, start=init_steps,
-                             beta_scale=prior['mean'] if scaled_jitter else None, return_cov=unc, model=model)
+                             beta_scale=prior['mean'] if scaled_jitter else None, return_cov=unc, model=model,
+                             return_loglik=loglik)
+        if loglik:
+            final[idx], likelihood[idx] = out
+            continue
         if not unc:
             final[idx] = out
             continue
@@ -162,6 +178,8 @@ def ukf_params(split, prior, q_accel, q_beta=0.0, beta_std=1.0, scaled_jitter=Fa
         var = np.einsum('nii->ni', cov)
         features[idx] = np.log(np.stack([np.sqrt(var[:, 6]) * drag_scale(final[idx], model) / prior['std'], np.sqrt(var[:, :3].mean(1)),
                                          np.sqrt(var[:, 3:6].mean(1)), np.nan_to_num(nis, nan=3.0)], axis=1))
+    if loglik:
+        return final, likelihood
     return (final, features) if unc else final
 
 
@@ -223,6 +241,79 @@ def run_b7(args):
     print('selected', table, q_accel, walk, beta_std, 'val', scores[table, q_accel, walk, beta_std], 'test', result['overall'], flush=True)
 
 
+def drag_modes(samples, k):
+    """Unlabeled k-component Gaussian mixture of training drag levels."""
+    scale = samples.mean()
+    gmm = GaussianMixture(k, reg_covar=1e-4, n_init=5, random_state=0).fit(samples[:, None] / scale)
+    order = np.argsort(gmm.means_[:, 0])
+    return {'weight': gmm.weights_[order].tolist(), 'mean': (gmm.means_[order, 0] * scale).tolist(),
+            'std': (np.sqrt(gmm.covariances_[order, 0, 0]) * scale).tolist()}
+
+
+def run_b8(split, modes, q_accel, walk, beta_std, model, horizon):
+    """MAP and probability-weighted forecasts of a static multiple-model UKF bank."""
+    forecasts, scores = [], []
+    for weight, mean, std in zip(modes['weight'], modes['mean'], modes['std']):
+        final, likelihood = ukf_params(split, {'mean': mean, 'std': std}, q_accel, (walk * std) ** 2, beta_std, True,
+                                       model=model, loglik=True)
+        forecasts.append(integrate(final[:, :6], final[:, 6], horizon, model=model))
+        scores.append(np.log(weight) + likelihood)
+    forecasts, scores = np.stack(forecasts), np.stack(scores)
+    prob = np.exp(scores - scores.max(axis=0))
+    prob /= prob.sum(axis=0)
+    rows = np.arange(forecasts.shape[1])
+    return {'map': forecasts[prob.argmax(axis=0), rows], 'mean': np.einsum('kn,knti->nti', prob, forecasts)}
+
+
+def _b8_init(data_dir, horizon):
+    global _B8_VAL, _B8_TRUE
+    _B8_VAL = load(data_dir, 'val')
+    _B8_TRUE = truth(_B8_VAL, horizon)
+
+
+def _b8_score(job):
+    setting, modes, horizon = job
+    preds = run_b8(_B8_VAL, modes, setting['q_accel'], setting['walk'], setting['beta_std'], setting['table'], horizon)
+    return setting, {name: evaluate(pred, _B8_TRUE, _B8_VAL['valid_len'])['overall']['ade_m']
+                     for name, pred in preds.items()}
+
+
+def run_b8_baseline(args):
+    """Select B8 on validation and evaluate it, or evaluate a stored selection with --b8-report."""
+    if args.b8_report:
+        report = json.loads(Path(args.b8_report).read_text(encoding='utf-8'))
+        s = report['selected']
+        test = load(args.data_dir, 'test')
+        pred = run_b8(test, s['modes'], s['q_accel'], s['walk'], s['beta_std'], s['table'], args.horizon)[s['combine']]
+        np.save(Path(args.out) / 'pred_B8_DragMMUKF.npy', pred.astype(np.float32))
+        print('B8', evaluate(pred, truth(test, args.horizon), test['valid_len'])['overall'], flush=True)
+        return
+    train = load(args.data_dir, 'train')
+    samples = {table: beta_samples(train, model=table) for table in ('const', 'g7')}
+    del train
+    modes = {(table, k): drag_modes(samples[table], k) for table in samples for k in (2, 3, 4, 6)}
+    jobs = [({'table': table, 'k': k, 'q_accel': q, 'walk': walk, 'beta_std': beta_std}, modes[table, k], args.horizon)
+            for (table, k) in modes for q in (0.01, 0.1, 1.0) for walk in (0.0, 0.05, 0.2) for beta_std in (0.5, 1.0, 2.0)]
+    for name in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS'):
+        os.environ[name] = '1'
+    scores = []
+    with ProcessPoolExecutor(args.b8_workers, initializer=_b8_init, initargs=(args.data_dir, args.horizon)) as pool:
+        for i, (setting, ade) in enumerate(pool.map(_b8_score, jobs), 1):
+            scores += [{**setting, 'combine': name, 'val_ade_m': value} for name, value in ade.items()]
+            print(i, len(jobs), setting, {k: round(v, 3) for k, v in ade.items()}, flush=True)
+    best = min(scores, key=lambda row: row['val_ade_m'])
+    selected = {**best, 'modes': modes[best['table'], best['k']]}
+    test = load(args.data_dir, 'test')
+    pred = run_b8(test, selected['modes'], best['q_accel'], best['walk'], best['beta_std'], best['table'],
+                  args.horizon)[best['combine']]
+    result = evaluate(pred, truth(test, args.horizon), test['valid_len'], test['meta'])
+    out = Path(args.out)
+    np.save(out / 'pred_B8_DragMMUKF.npy', pred.astype(np.float32))
+    (out / 'report_b8.json').write_text(json.dumps({'selected': selected, 'validation': scores, 'test': result}, indent=2),
+                                        encoding='utf-8')
+    print('selected', {k: v for k, v in selected.items() if k != 'modes'}, 'test', result['overall'], flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--data-dir', required=True)
@@ -237,13 +328,18 @@ def main():
                         help='With --anchor-model ukf: also save anchor_unc_<split>.npy (UKF uncertainty features)')
     parser.add_argument('--anchor-model', choices=('b4', 'b6', 'ukf', 'b7'), default='b4',
                         help='With --anchors-only --report: anchors from B4, the selected B6 table, or the B5 UKF')
+    parser.add_argument('--b5-fix', action='store_true',
+                        help='B5 with beta-scaled UKF jitter and a validation-selected initial beta std')
     parser.add_argument('--b7', action='store_true', help='With --report: select and evaluate the standard-drag UKF')
     parser.add_argument('--b7-report', help='Stored B7 selection: evaluate it with --b7, or use it with --anchor-model b7')
     parser.add_argument('--design-noise', action='store_true',
                         help='With --anchor-model ukf: the UKF assumes the design noise level, not the data level')
-    parser.add_argument('--b5-fix', action='store_true',
-                        help='B5 with beta-scaled UKF jitter and a validation-selected initial beta std')
+    parser.add_argument('--b8', action='store_true', help='Select and evaluate the multiple-model UKF bank')
+    parser.add_argument('--b8-report', help='Stored B8 selection to evaluate on --data-dir')
+    parser.add_argument('--b8-workers', type=int, default=8)
     args = parser.parse_args()
+    if args.b8:
+        return run_b8_baseline(args)
     if args.b7:
         if not args.report:
             parser.error('--b7 requires --report')
